@@ -1,0 +1,19 @@
+# Bot Red Card v2 — Dependências
+# Ambiente: Python 3.11-slim + Playwright Stealth
+
+# --- Core ---
+playwright>=1.49.0
+playwright-stealth>=1.0.6
+
+# --- Modelos e validação ---
+pydantic>=2.10.0
+pydantic-settings>=2.7.0
+
+# --- HTTP client leve (Telegram, healthcheck) ---
+httpx>=0.28.0
+
+# --- TLS fingerprint bypass (API overview) ---
+curl_cffi>=0.6.0
+
+# --- Env ---
+python-dotenv>=1.0.0

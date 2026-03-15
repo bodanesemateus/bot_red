@@ -1,0 +1,28 @@
+# Bot Red Card v2
+# Docker Compose para produção
+
+services:
+  bot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: bot_red_card
+    restart: unless-stopped
+    # Envelopamos no bash para forçar a captura de todas as saídas (stdout e stderr)
+    command: /bin/bash -c "xvfb-run --auto-servernum --server-args='-screen 0 1920x1080x24' python main.py 2>&1"
+    env_file:
+      - .env
+    environment:
+      - TZ=America/Sao_Paulo
+      - PYTHONUNBUFFERED=1  # Força o Python a mandar os logs na mesma hora, sem cache
+    # Shared memory aumentado para Chromium (evita crash em páginas pesadas)
+    shm_size: "512m"
+    deploy:
+      resources:
+        limits:
+          memory: 2g
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
