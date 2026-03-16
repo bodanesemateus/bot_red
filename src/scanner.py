@@ -28,13 +28,29 @@ VALID_MARKET_NAMES: list[str] = [
     "expulsao",
 ]
 
-# Seleções Under (match exato)
-UNDER_SELECTIONS: list[str] = [
-    "não",
-    "nao",
-    "menos de 0.5",
-    "under 0.5",
-]
+# Linhas monitoradas (com ponto e vírgula para cobrir variações de formato)
+_VALID_LINES = ("0.5", "0,5", "1.5", "1,5")
+
+# Palavras que indicam Under
+_UNDER_KEYWORDS = ("menos", "under", "nao", "não")
+
+
+def _is_under_selection(name: str) -> bool:
+    """Valida se uma seleção é Under de cartão vermelho (busca por substring).
+
+    Aceita:
+    - "Menos de 0.5", "Under 1,5", etc. (contém linha + keyword under)
+    - "Não" / "Nao" sozinho (mercado 'Haverá cartão vermelho?' → equivale a Under 0.5)
+    """
+    lower = name.lower().strip()
+
+    # Exceção: "não"/"nao" exato → under 0.5 implícito
+    if lower in ("não", "nao"):
+        return True
+
+    has_line = any(line in lower for line in _VALID_LINES)
+    has_under = any(kw in lower for kw in _UNDER_KEYWORDS)
+    return has_line and has_under
 
 # Seletores para a aba de Cartões na SPA
 _TAB_SELECTORS: list[str] = [
@@ -52,8 +68,10 @@ class Scanner:
 
     # ── API pública ────────────────────────────────────────────────
 
-    async def scan_event(self, game: GameContext) -> Optional[Opportunity]:
-        """Escaneia um jogo buscando mercado Under Cartão Vermelho.
+    async def scan_event(self, game: GameContext) -> list[Opportunity]:
+        """Escaneia um jogo buscando mercados Under Cartão Vermelho.
+
+        Retorna lista de oportunidades (pode ter Under 0.5 e Under 1.5 no mesmo jogo).
 
         Fluxo:
         1. Abre página do jogo no contexto quente
@@ -105,13 +123,13 @@ class Scanner:
             loaded = await self._browser.navigate(page, full_url)
             if not loaded:
                 print(f"    [Scanner] Página bloqueada para {game.label}")
-                return None
+                return []
 
             # 2. Esperar abas da SPA renderizarem
             tabs_ok = await self._wait_for_tabs(page)
             if not tabs_ok:
                 print(f"    [Scanner] Abas não carregaram para {game.label}")
-                return None
+                return []
 
             # Snapshot pré-clique (mercados que vieram no carregamento inicial)
             pre_click_count = len(captured_markets)
@@ -120,7 +138,7 @@ class Scanner:
             clicked = await self._click_cards_tab(page)
             if not clicked:
                 print(f"    [INFO] Aba 'Cartões' não encontrada — jogo sem mercado de cartão ({game.label})")
-                return None
+                return []
 
             # 4. Aguardar lazy-loading: 3s para o interceptor capturar os
             #    novos JSONs de mercados que chegam pela rede após o clique
@@ -135,12 +153,12 @@ class Scanner:
             if lazy_loaded == 0:
                 print(f"    [Scanner] Nenhum mercado novo após clique na aba Cartões")
 
-            # 5. Buscar oportunidade nos mercados capturados
-            return self._find_opportunity(game, full_url, captured_markets, captured_selections)
+            # 5. Buscar oportunidades nos mercados capturados
+            return self._find_opportunities(game, full_url, captured_markets, captured_selections)
 
         except Exception as e:
             print(f"    [Scanner] Erro em {game.label}: {e}")
-            return None
+            return []
 
         finally:
             if page:
@@ -177,10 +195,11 @@ class Scanner:
             )
 
             try:
-                result = await asyncio.wait_for(self.scan_event(game), timeout=45)
-                if result:
-                    print(f"  [OK] OPORTUNIDADE: {result.selection_name} @ {result.odd:.2f}")
-                    opportunities.append(result)
+                results = await asyncio.wait_for(self.scan_event(game), timeout=45)
+                if results:
+                    for r in results:
+                        print(f"  [OK] OPORTUNIDADE: {r.selection_name} @ {r.odd:.2f}")
+                    opportunities.extend(results)
                 else:
                     print(f"  [OK] Sem oportunidade Under cartão vermelho")
             except asyncio.TimeoutError:
@@ -245,13 +264,18 @@ class Scanner:
         return False
 
     @staticmethod
-    def _find_opportunity(
+    def _find_opportunities(
         game: GameContext,
         full_url: str,
         markets: dict,
         selections: dict,
-    ) -> Optional[Opportunity]:
-        """Busca mercado Under Cartão Vermelho nos dados interceptados."""
+    ) -> list[Opportunity]:
+        """Busca mercados Under Cartão Vermelho nos dados interceptados.
+
+        Retorna todas as oportunidades encontradas (Under 0.5 e Under 1.5).
+        """
+        found: list[Opportunity] = []
+
         for _mid, market in markets.items():
             market_name = market.get("name", "").lower().strip()
 
@@ -274,13 +298,13 @@ class Scanner:
                 ]
 
             for sel in market_sels:
-                sel_name = sel.get("name", "").lower().strip()
-                if sel_name not in UNDER_SELECTIONS:
+                sel_name = sel.get("name", "")
+                if not _is_under_selection(sel_name):
                     continue
 
                 price = sel.get("price", 0)
                 if price and price >= settings.min_odd_threshold:
-                    return Opportunity(
+                    found.append(Opportunity(
                         event_id=game.id,
                         home_team=game.home,
                         away_team=game.away,
@@ -291,6 +315,6 @@ class Scanner:
                         competition=game.competition,
                         minute=game.minute,
                         score=game.score,
-                    )
+                    ))
 
-        return None
+        return found

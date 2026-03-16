@@ -133,6 +133,7 @@ async def run() -> None:
     # Notificar início
     telegram.send_message(
         f"<b>BOT RED CARD v2 iniciado</b>\n\n"
+        f"Linhas: Under 0.5 e 1.5\n"
         f"Cooldown: {settings.cooldown_seconds}s\n"
         f"Max eventos: {settings.max_events_per_cycle}\n"
         f"Odd mínima: {settings.min_odd_threshold}\n"
@@ -162,15 +163,19 @@ async def run() -> None:
             opportunities = await scanner.scan_all(games)
             elapsed = time.time() - start
 
-            # Filtrar já alertadas
-            new_opps = [o for o in opportunities if o.event_id not in alerted_events]
+            # Filtrar já alertadas (chave: event_id + selection para permitir
+            # Under 0.5 e Under 1.5 no mesmo jogo como alertas distintos)
+            new_opps = [
+                o for o in opportunities
+                if f"{o.event_id}:{o.selection_name}" not in alerted_events
+            ]
             print(f"Tempo: {elapsed:.0f}s | Oportunidades: {len(opportunities)} ({len(new_opps)} novas)")
 
             for opp in new_opps:
                 print(f"  >> {opp.label} | {opp.selection_name} | Odd: {opp.odd:.2f}")
                 sent = telegram.send_opportunity_alert(opp)
                 print(f"  [Telegram] {'OK' if sent else 'FALHOU'}")
-                alerted_events.add(opp.event_id)
+                alerted_events.add(f"{opp.event_id}:{opp.selection_name}")
 
             total_opportunities += len(new_opps)
 
