@@ -78,29 +78,56 @@ def _extract_live_games(data: dict) -> list[GameContext]:
     return result
 
 
-def _fetch_live_events() -> list[GameContext]:
-    """Busca eventos ao vivo via curl_cffi (TLS fingerprint bypass).
+async def _fetch_live_events(browser: "BrowserEngine") -> list[GameContext]:
+    """Busca eventos ao vivo.
 
-    Usa impersonate="chrome120" para falsificar o TLS handshake e passar
-    pelo Cloudflare/WAF sem problemas. Rápido e confiável para a API REST.
+    Tenta primeiro curl_cffi (rápido). Se receber 403 por bloqueio de
+    datacenter, usa o browser Playwright como fallback (mais lento mas
+    contorna reputação de IP).
     """
+    # ── Tentativa 1: curl_cffi direto ──────────────────────────────
     try:
         print(f"  [API] GET {settings.overview_url[:80]}...")
         response = curl_requests.get(
             settings.overview_url,
-            headers={"Accept": "application/json"},
-            impersonate="chrome120",
+            headers={
+                "Accept": "application/json, text/plain, */*",
+                "Accept-Language": "pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7",
+                "Referer": "https://www.betano.bet.br/sport/futebol/",
+                "Sec-Fetch-Dest": "empty",
+                "Sec-Fetch-Mode": "cors",
+                "Sec-Fetch-Site": "same-origin",
+            },
+            impersonate="chrome131",
             timeout=30,
         )
         print(f"  [API] HTTP {response.status_code} | {len(response.content)} bytes")
 
-        if response.status_code != 200:
-            print(f"  [API] Erro: HTTP {response.status_code}")
+        if response.status_code == 200:
+            data = response.json()
+            games = _extract_live_games(data)
+            print(f"  [API] curl_cffi OK | {len(games)} jogos")
+            for g in games[:5]:
+                print(f"    - {g.label} | Min: {g.minute}' | Mercados: {g.total_markets}")
+            if len(games) > 5:
+                print(f"    ... e mais {len(games) - 5} jogos")
+            return games
+
+        print(f"  [API] curl_cffi bloqueado (HTTP {response.status_code}) → usando browser")
+
+    except Exception as e:
+        print(f"  [API] curl_cffi falhou ({e}) → usando browser")
+
+    # ── Tentativa 2: browser (session quente, bypassa IP blocklist) ─
+    try:
+        print(f"  [API] Browser fetch {settings.overview_url[:80]}...")
+        data = await browser.fetch_json(settings.overview_url)
+        if not data:
+            print("  [API] Browser fetch retornou vazio")
             return []
 
-        data = response.json()
         games = _extract_live_games(data)
-        print(f"  [API] Futebol ao vivo (>= {settings.min_match_minute} min): {len(games)} jogos")
+        print(f"  [API] Browser OK | {len(games)} jogos")
         for g in games[:5]:
             print(f"    - {g.label} | Min: {g.minute}' | Mercados: {g.total_markets}")
         if len(games) > 5:
@@ -108,7 +135,7 @@ def _fetch_live_events() -> list[GameContext]:
         return games
 
     except Exception as e:
-        print(f"  [API] Erro ao buscar eventos: {e}")
+        print(f"  [API] Browser fetch falhou: {e}")
         return []
 
 
@@ -155,8 +182,8 @@ async def run() -> None:
             if cycle > 1 and cycle % settings.recycle_every_n_cycles == 0:
                 await browser.recycle()
 
-            # Fase 1: buscar eventos ao vivo via curl_cffi (rápido)
-            games = _fetch_live_events()
+            # Fase 1: buscar eventos ao vivo (curl_cffi com fallback browser)
+            games = await _fetch_live_events(browser)
 
             # Escanear mercados
             start = time.time()

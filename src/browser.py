@@ -165,6 +165,62 @@ class BrowserEngine:
         await self.start()
         await self.warm_session()
 
+    # ── Fetch via Browser ──────────────────────────────────────────
+
+    async def fetch_json(self, url: str) -> Optional[dict]:
+        """Busca JSON usando o contexto do browser (bypassa bloqueio de IP).
+
+        Usa a sessão quente (cookies + fingerprint) para fazer a requisição
+        via JS fetch(), contornando bloqueios de datacenter que afetam o
+        curl_cffi direto.
+        """
+        if not self._context:
+            return None
+
+        page = await self._context.new_page()
+        await self._stealth.apply_stealth_async(page)
+
+        try:
+            # Navega para a home como referer antes de fazer o fetch
+            await page.goto(
+                settings.base_url,
+                wait_until="domcontentloaded",
+                timeout=settings.page_load_timeout,
+            )
+
+            result = await page.evaluate(
+                """async (url) => {
+                    try {
+                        const resp = await fetch(url, {
+                            method: 'GET',
+                            headers: {
+                                'Accept': 'application/json, text/plain, */*',
+                                'Accept-Language': 'pt-BR,pt;q=0.9',
+                            },
+                            credentials: 'include',
+                        });
+                        if (!resp.ok) return { __error: resp.status };
+                        return await resp.json();
+                    } catch(e) {
+                        return { __error: String(e) };
+                    }
+                }""",
+                url,
+            )
+
+            if isinstance(result, dict) and "__error" in result:
+                print(f"  [Browser.fetch_json] Erro: {result['__error']}")
+                return None
+
+            return result
+
+        except Exception as e:
+            print(f"  [Browser.fetch_json] Exceção: {e}")
+            return None
+
+        finally:
+            await page.close()
+
     # ── Navegação ──────────────────────────────────────────────────
 
     async def new_page(self) -> Page:
