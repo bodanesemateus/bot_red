@@ -19,14 +19,83 @@ from src.scanner import Scanner
 from src import telegram_notifier as telegram
 
 
+def _resolve_competition(event: dict, leagues: dict, regions: dict) -> str:
+    """Resolve o nome da competição de um evento.
+
+    Tenta múltiplos caminhos na resposta da API:
+    1. Campo direto no evento (leagueName, competitionName)
+    2. Objeto aninhado (league.name, tournament.name)
+    3. Resolução via leagueId no dicionário top-level de leagues
+    4. Resolução via regionId no dicionário top-level de regions
+    """
+    # Caminho 1: campo direto no evento
+    name = (
+        event.get("leagueName")
+        or event.get("competitionName")
+        or event.get("regionLeagueName")
+    )
+    if name:
+        return name
+
+    # Caminho 2: objeto aninhado
+    league_obj = event.get("league")
+    if isinstance(league_obj, dict) and league_obj.get("name"):
+        return league_obj["name"]
+
+    tournament_obj = event.get("tournament")
+    if isinstance(tournament_obj, dict) and tournament_obj.get("name"):
+        return tournament_obj["name"]
+
+    # Caminho 3: resolver via leagueId no dict top-level
+    league_id = event.get("leagueId") or event.get("league_id") or event.get("competitionId")
+    if league_id is not None:
+        league_data = leagues.get(str(league_id), {})
+        league_name = league_data.get("name") or league_data.get("description")
+        if league_name:
+            # Tentar enriquecer com região
+            region_id = event.get("regionId") or event.get("region_id") or event.get("zoneId")
+            if region_id is not None:
+                region_data = regions.get(str(region_id), {})
+                region_name = region_data.get("name")
+                if region_name:
+                    return f"{region_name} - {league_name}"
+            return league_name
+
+    # Caminho 4: só região como último recurso
+    region_id = event.get("regionId") or event.get("region_id") or event.get("zoneId")
+    if region_id is not None:
+        region_data = regions.get(str(region_id), {})
+        region_name = region_data.get("name")
+        if region_name:
+            return region_name
+
+    return "Desconhecida"
+
+
 def _extract_live_games(data: dict) -> list[GameContext]:
     """Extrai jogos de futebol ao vivo da resposta da API."""
     events = data.get("events", {})
+    leagues = data.get("leagues", {})
+    regions = data.get("regions", {}) or data.get("zones", {})
     result: list[GameContext] = []
+
+    # Log de debug (apenas 1x) para mapear estrutura da API
+    _logged_debug = False
 
     for eid, event in events.items():
         if event.get("sportId") != "FOOT":
             continue
+
+        if not _logged_debug:
+            print(f"  [DEBUG] Top-level keys: {list(data.keys())}")
+            print(f"  [DEBUG] Event keys: {sorted(event.keys())}")
+            if leagues:
+                first_league = next(iter(leagues.values()), {})
+                print(f"  [DEBUG] League keys: {sorted(first_league.keys()) if isinstance(first_league, dict) else first_league}")
+            if regions:
+                first_region = next(iter(regions.values()), {})
+                print(f"  [DEBUG] Region keys: {sorted(first_region.keys()) if isinstance(first_region, dict) else first_region}")
+            _logged_debug = True
 
         participants = event.get("participants", [])
         if any("esports" in p.get("name", "").lower() for p in participants):
@@ -45,13 +114,8 @@ def _extract_live_games(data: dict) -> list[GameContext]:
         home = participants[0].get("name", "?") if len(participants) > 0 else "?"
         away = participants[1].get("name", "?") if len(participants) > 1 else "?"
 
-        # Competição
-        competition = (
-            event.get("league", {}).get("name")
-            or event.get("tournament", {}).get("name")
-            or event.get("leagueName")
-            or "Desconhecida"
-        )
+        # Competição (resolução robusta)
+        competition = _resolve_competition(event, leagues, regions)
 
         # Placar ao vivo
         live_data = event.get("liveData", {})
@@ -170,6 +234,7 @@ async def run() -> None:
     cycle = 0
     total_opportunities = 0
     alerted_events: set[str] = set()
+    last_cleanup = time.time()
 
     try:
         while True:
@@ -177,6 +242,12 @@ async def run() -> None:
             print(f"\n{'=' * 60}")
             print(f"CICLO {cycle} | {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}")
             print(f"{'=' * 60}")
+
+            # Limpeza de alertas a cada 30 min
+            if time.time() - last_cleanup >= 1800:
+                print(f"  [Cleanup] Limpando {len(alerted_events)} alertas da memória")
+                alerted_events.clear()
+                last_cleanup = time.time()
 
             # Reciclagem periódica
             if cycle > 1 and cycle % settings.recycle_every_n_cycles == 0:

@@ -39,3 +39,4 @@ Thumbs.db
 # Logs
 *.log
 logs/
+bot-red-key.pem
