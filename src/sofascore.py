@@ -70,7 +70,7 @@ async def get_red_cards(event_id: int) -> int:
     incidents = await _get_incidents(event_id)
     return sum(
         1 for inc in incidents
-        if inc.get("incidentType") == "card" and inc.get("cardType") == "red"
+        if inc.get("incidentType") == "card" and inc.get("cardType") in ("red", "yellowRed")
     )
 
 
@@ -113,7 +113,11 @@ async def validate_opportunity(
     )
 
     for attempt in range(max_polls):
-        event = await find_event(date_str, home, away)
+        try:
+            event = await find_event(date_str, home, away)
+        except Exception as e:
+            print(f"  [SofaScore] Erro buscando {home} x {away}: {e}")
+            return _unverified
 
         if event is None:
             return _unverified
@@ -121,7 +125,11 @@ async def validate_opportunity(
         status_type = event.get("status", {}).get("type", "")
 
         if status_type == "finished":
-            red_cards = await get_red_cards(event["id"])
+            try:
+                red_cards = await get_red_cards(event["id"])
+            except Exception as e:
+                print(f"  [SofaScore] Erro buscando incidentes {home} x {away}: {e}")
+                return _unverified
             won = _is_under_won(entry["selection_name"], red_cards)
             return MatchResult(
                 home_team=home,

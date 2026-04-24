@@ -88,6 +88,18 @@ async def test_get_red_cards_counts_correctly():
 
 
 @pytest.mark.asyncio
+async def test_get_red_cards_counts_yellow_red():
+    incidents = [
+        {"incidentType": "card", "cardType": "yellowRed", "time": 70, "isHome": True},
+        {"incidentType": "card", "cardType": "yellow", "time": 30, "isHome": False},
+    ]
+    with patch("src.sofascore._get_incidents", new_callable=AsyncMock) as mock_inc:
+        mock_inc.return_value = incidents
+        count = await sofascore.get_red_cards(99001)
+    assert count == 1
+
+
+@pytest.mark.asyncio
 async def test_get_red_cards_zero_when_none():
     with patch("src.sofascore._get_incidents", new_callable=AsyncMock) as mock_inc:
         mock_inc.return_value = INCIDENTS_NO_RED["incidents"]

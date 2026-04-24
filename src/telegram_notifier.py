@@ -50,7 +50,7 @@ def send_opportunity_alert(opp: Opportunity) -> bool:
     return _post(text)
 
 
-def send_daily_report(results: list, report_date: str | None = None) -> bool:
+def send_daily_report(results: list[MatchResult], report_date: str | None = None) -> bool:
     """Envia relatório diário consolidado no Telegram."""
     if report_date is None:
         report_date = _date.today().strftime("%d/%m/%Y")

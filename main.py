@@ -269,18 +269,27 @@ async def daily_reporter() -> None:
     """Task paralela: às 23:45 valida oportunidades do dia e envia relatório."""
     while True:
         await _sleep_until(23, 45)
-        print("\n[DailyReporter] Iniciando validação do dia...")
 
-        entries = opportunity_log.load_today()
-        if entries:
-            print(f"[DailyReporter] {len(entries)} oportunidade(s) para validar")
-            results = await validate_all(entries)
-            sent = telegram.send_daily_report(results)
-            print(f"[DailyReporter] Relatório enviado: {'OK' if sent else 'FALHOU'}")
-        else:
-            print("[DailyReporter] Nenhuma oportunidade hoje — relatório suprimido")
+        # Captura a data ANTES do polling (que pode cruzar a meia-noite)
+        from datetime import date as _date
+        today_str = _date.today().isoformat()
 
-        opportunity_log.delete_today()
+        try:
+            print(f"\n[DailyReporter] Iniciando validação do dia {today_str}...")
+
+            entries = opportunity_log.load_today(today_str)
+            if entries:
+                print(f"[DailyReporter] {len(entries)} oportunidade(s) para validar")
+                results = await validate_all(entries, date_str=today_str)
+                sent = telegram.send_daily_report(results)
+                print(f"[DailyReporter] Relatório enviado: {'OK' if sent else 'FALHOU'}")
+            else:
+                print("[DailyReporter] Nenhuma oportunidade hoje — relatório suprimido")
+
+            opportunity_log.delete_today(today_str)
+        except Exception as e:
+            print(f"[DailyReporter] Erro: {e}")
+
         await asyncio.sleep(60)
 
 
