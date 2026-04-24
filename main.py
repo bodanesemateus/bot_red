@@ -4,7 +4,14 @@
 Arquitetura híbrida:
 - Fase 1: curl_cffi busca eventos ao vivo via API REST (TLS fingerprint bypass)
 - Fase 2: Playwright com Sessão Quente escaneia mercados de cartão (stealth)
+
+Fallback em 3 estágios para discovery de eventos ao vivo:
+  Estágio 1: curl_cffi + cookies do Playwright         (~200ms)
+  Estágio 2: fetch() na aba persistente                (~1-2s)
+  Estágio 3: fetch_json com nova aba (comportamento anterior) (~8-15s)
 """
+
+from __future__ import annotations
 
 import asyncio
 import time
@@ -17,6 +24,51 @@ from src.config import settings
 from src.models import GameContext
 from src.scanner import Scanner
 from src import telegram_notifier as telegram
+
+
+def _build_curl_session(cookies: list[dict], user_agent: str) -> curl_requests.Session:
+    """Cria Session curl_cffi autenticada com cookies do Playwright.
+
+    O Playwright passa no challenge Cloudflare e recebe cookies de sessão
+    (incluindo cf_clearance). Transferir esses cookies para o curl_cffi
+    permite requests diretas (~200ms) sem precisar do browser.
+    """
+    session = curl_requests.Session(impersonate="chrome131")
+
+    for c in cookies:
+        session.cookies.set(
+            c["name"],
+            c["value"],
+            domain=c.get("domain", "").lstrip("."),
+            path=c.get("path", "/"),
+        )
+
+    session.headers.update({
+        "User-Agent": user_agent,
+        "Accept": "application/json, text/plain, */*",
+        "Accept-Language": "pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7",
+        "Referer": f"{settings.base_url}/sport/futebol/",
+        "Sec-Fetch-Dest": "empty",
+        "Sec-Fetch-Mode": "cors",
+        "Sec-Fetch-Site": "same-origin",
+    })
+
+    return session
+
+
+async def _refresh_curl_session(browser: "BrowserEngine") -> curl_requests.Session | None:
+    """Extrai cookies do browser e cria/atualiza a Session curl_cffi."""
+    try:
+        cookies = await browser.export_cookies()
+        ua = browser.user_agent
+        if not cookies or not ua:
+            return None
+        session = _build_curl_session(cookies, ua)
+        print(f"  [Session] curl_cffi atualizada com {len(cookies)} cookies")
+        return session
+    except Exception as e:
+        print(f"  [Session] Erro ao exportar cookies: {e}")
+        return None
 
 
 def _resolve_competition(event: dict, leagues: dict, regions: dict) -> str:
@@ -142,53 +194,50 @@ def _extract_live_games(data: dict) -> list[GameContext]:
     return result
 
 
-async def _fetch_live_events(browser: "BrowserEngine") -> list[GameContext]:
-    """Busca eventos ao vivo.
+async def _fetch_live_events(
+    browser: "BrowserEngine",
+    curl_session: curl_requests.Session | None = None,
+) -> tuple[list[GameContext], bool]:
+    """Busca eventos ao vivo com fallback em 3 estágios.
 
-    Tenta primeiro curl_cffi (rápido). Se receber 403 por bloqueio de
-    datacenter, usa o browser Playwright como fallback (mais lento mas
-    contorna reputação de IP).
+    Retorna (jogos, needs_cookie_refresh).
+    needs_cookie_refresh=True indica que os cookies expiraram e devem
+    ser renovados antes do próximo ciclo.
+
+    Estágio 1: curl_cffi + cookies do Playwright  (~200ms)
+    Estágio 2: fetch() na aba persistente          (~1-2s)
+    Estágio 3: fetch_json com nova aba             (~8-15s)
     """
-    # ── Tentativa 1: curl_cffi direto ──────────────────────────────
-    try:
-        print(f"  [API] GET {settings.overview_url[:80]}...")
-        response = curl_requests.get(
-            settings.overview_url,
-            headers={
-                "Accept": "application/json, text/plain, */*",
-                "Accept-Language": "pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7",
-                "Referer": "https://www.betano.bet.br/sport/futebol/",
-                "Sec-Fetch-Dest": "empty",
-                "Sec-Fetch-Mode": "cors",
-                "Sec-Fetch-Site": "same-origin",
-            },
-            impersonate="chrome131",
-            timeout=30,
-        )
-        print(f"  [API] HTTP {response.status_code} | {len(response.content)} bytes")
+    needs_refresh = False
 
-        if response.status_code == 200:
-            data = response.json()
-            games = _extract_live_games(data)
-            print(f"  [API] curl_cffi OK | {len(games)} jogos")
-            for g in games[:5]:
-                print(f"    - {g.label} | Min: {g.minute}' | Mercados: {g.total_markets}")
-            if len(games) > 5:
-                print(f"    ... e mais {len(games) - 5} jogos")
-            return games
+    # ── Estágio 1: curl_cffi + cookies do Playwright (~200ms) ──────
+    if curl_session:
+        try:
+            print(f"  [API] curl_cffi+cookies GET {settings.overview_url[:80]}...")
+            response = curl_session.get(settings.overview_url, timeout=15)
+            print(f"  [API] curl_cffi+cookies HTTP {response.status_code} | {len(response.content)} bytes")
+            if response.status_code == 200:
+                data = response.json()
+                games = _extract_live_games(data)
+                print(f"  [API] curl_cffi+cookies OK | {len(games)} jogos")
+                for g in games[:5]:
+                    print(f"    - {g.label} | Min: {g.minute}' | Mercados: {g.total_markets}")
+                if len(games) > 5:
+                    print(f"    ... e mais {len(games) - 5} jogos")
+                return games, False
+            print(f"  [API] curl_cffi+cookies falhou ({response.status_code}) → fallback browser")
+            needs_refresh = True
+        except Exception as e:
+            print(f"  [API] curl_cffi+cookies erro ({e}) → fallback browser")
+            needs_refresh = True
 
-        print(f"  [API] curl_cffi bloqueado (HTTP {response.status_code}) → usando browser")
-
-    except Exception as e:
-        print(f"  [API] curl_cffi falhou ({e}) → usando browser")
-
-    # ── Tentativa 2: browser (session quente, bypassa IP blocklist) ─
+    # ── Estágio 2/3: browser (aba persistente ou nova aba) ─────────
     try:
         print(f"  [API] Browser fetch {settings.overview_url[:80]}...")
         data = await browser.fetch_json(settings.overview_url)
         if not data:
             print("  [API] Browser fetch retornou vazio")
-            return []
+            return [], needs_refresh
 
         games = _extract_live_games(data)
         print(f"  [API] Browser OK | {len(games)} jogos")
@@ -196,11 +245,11 @@ async def _fetch_live_events(browser: "BrowserEngine") -> list[GameContext]:
             print(f"    - {g.label} | Min: {g.minute}' | Mercados: {g.total_markets}")
         if len(games) > 5:
             print(f"    ... e mais {len(games) - 5} jogos")
-        return games
+        return games, needs_refresh
 
     except Exception as e:
         print(f"  [API] Browser fetch falhou: {e}")
-        return []
+        return [], needs_refresh
 
 
 async def run() -> None:
@@ -218,6 +267,9 @@ async def run() -> None:
     browser = BrowserEngine()
     await browser.start()
     await browser.warm_session()
+
+    # Criar session curl_cffi com cookies do Playwright (Estágio 1)
+    curl_session = await _refresh_curl_session(browser)
 
     scanner = Scanner(browser)
 
@@ -249,12 +301,21 @@ async def run() -> None:
                 alerted_events.clear()
                 last_cleanup = time.time()
 
-            # Reciclagem periódica
+            # Reciclagem periódica (stop + start + warm_session internamente)
             if cycle > 1 and cycle % settings.recycle_every_n_cycles == 0:
                 await browser.recycle()
+                curl_session = await _refresh_curl_session(browser)
 
-            # Fase 1: buscar eventos ao vivo (curl_cffi com fallback browser)
-            games = await _fetch_live_events(browser)
+            # Refresh proativo de cookies a cada 5 ciclos (~25 min com cooldown=300s)
+            elif cycle > 1 and cycle % 5 == 0:
+                curl_session = await _refresh_curl_session(browser) or curl_session
+
+            # Fase 1: buscar eventos ao vivo (3 estágios)
+            games, needs_refresh = await _fetch_live_events(browser, curl_session)
+
+            # Se cookies expiraram (403 no Estágio 1), renovar antes do próximo ciclo
+            if needs_refresh:
+                curl_session = await _refresh_curl_session(browser) or curl_session
 
             # Escanear mercados
             start = time.time()

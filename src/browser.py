@@ -62,6 +62,8 @@ class BrowserEngine:
         self._context: Optional[BrowserContext] = None
         self._stealth = Stealth()
         self._warm: bool = False
+        self._fetch_page: Optional[Page] = None
+        self._user_agent: str = ""
 
     # ── Lifecycle ──────────────────────────────────────────────────
 
@@ -84,6 +86,7 @@ class BrowserEngine:
         )
 
         ua = random.choice(_USER_AGENTS)
+        self._user_agent = ua
         vp = random.choice(_VIEWPORTS)
 
         self._context = await self._browser.new_context(
@@ -106,6 +109,7 @@ class BrowserEngine:
         """Sessão Quente: navega na home, aceita cookies, instala sessão.
 
         Retorna True se a sessão foi aquecida com sucesso.
+        Guarda a aba aberta em _fetch_page para reutilização em fetch_json().
         """
         if not self._context:
             return False
@@ -129,19 +133,39 @@ class BrowserEngine:
             cookies = await self._context.cookies()
             print(f"[Browser] Sessão quente — {len(cookies)} cookies instalados")
             self._warm = True
+
+            # Fechar aba persistente anterior se existir
+            if self._fetch_page:
+                try:
+                    await self._fetch_page.close()
+                except Exception:
+                    pass
+            # Guardar aba para fetch_json reutilizar (já está na home, com cookies)
+            self._fetch_page = page
             return True
 
         except Exception as e:
             print(f"[Browser] AVISO: aquecimento falhou: {e}")
             self._warm = False
+            await page.close()
             return False
 
-        finally:
-            await page.close()
+    async def export_cookies(self) -> list[dict]:
+        """Exporta cookies do contexto para uso em clientes HTTP externos."""
+        if not self._context:
+            return []
+        return await self._context.cookies()
 
     async def stop(self) -> None:
         """Encerra contexto, browser e Playwright."""
         self._warm = False
+        # Fechar aba persistente primeiro
+        if self._fetch_page:
+            try:
+                await self._fetch_page.close()
+            except Exception:
+                pass
+            self._fetch_page = None
         for resource in (self._context, self._browser):
             if resource:
                 try:
@@ -168,26 +192,58 @@ class BrowserEngine:
     # ── Fetch via Browser ──────────────────────────────────────────
 
     async def fetch_json(self, url: str) -> Optional[dict]:
-        """Busca JSON usando o contexto do browser (bypassa bloqueio de IP).
+        """Busca JSON usando aba persistente (fast path) ou nova aba (fallback).
 
-        Usa a sessão quente (cookies + fingerprint) para fazer a requisição
-        via JS fetch(), contornando bloqueios de datacenter que afetam o
-        curl_cffi direto.
+        Fast path: reutiliza _fetch_page já na home (~1-2s).
+        Fallback: abre nova aba, navega home, faz fetch (~8-15s).
         """
+        # ── Fast path: aba persistente ────────────────────────────────
+        if self._fetch_page:
+            try:
+                result = await self._fetch_page.evaluate(
+                    """async (url) => {
+                        try {
+                            const resp = await fetch(url, {
+                                method: 'GET',
+                                headers: {
+                                    'Accept': 'application/json, text/plain, */*',
+                                    'Accept-Language': 'pt-BR,pt;q=0.9',
+                                },
+                                credentials: 'include',
+                            });
+                            if (!resp.ok) return { __error: resp.status };
+                            return await resp.json();
+                        } catch(e) {
+                            return { __error: String(e) };
+                        }
+                    }""",
+                    url,
+                )
+                if isinstance(result, dict) and "__error" not in result:
+                    return result
+                print(f"  [Browser.fetch_json] Aba persistente falhou: {result.get('__error')}")
+                await self._fetch_page.close()
+                self._fetch_page = None
+            except Exception as e:
+                print(f"  [Browser.fetch_json] Aba persistente erro: {e}")
+                try:
+                    await self._fetch_page.close()
+                except Exception:
+                    pass
+                self._fetch_page = None
+
+        # ── Fallback: nova aba ────────────────────────────────────────
         if not self._context:
             return None
 
         page = await self._context.new_page()
         await self._stealth.apply_stealth_async(page)
-
         try:
-            # Navega para a home como referer antes de fazer o fetch
             await page.goto(
                 settings.base_url,
                 wait_until="domcontentloaded",
                 timeout=settings.page_load_timeout,
             )
-
             result = await page.evaluate(
                 """async (url) => {
                     try {
@@ -207,19 +263,19 @@ class BrowserEngine:
                 }""",
                 url,
             )
-
             if isinstance(result, dict) and "__error" in result:
-                print(f"  [Browser.fetch_json] Erro: {result['__error']}")
+                print(f"  [Browser.fetch_json] Fallback erro: {result['__error']}")
                 return None
-
+            # Promover aba para persistente se deu certo
+            self._fetch_page = page
+            page = None  # Não fechar no finally
             return result
-
         except Exception as e:
-            print(f"  [Browser.fetch_json] Exceção: {e}")
+            print(f"  [Browser.fetch_json] Fallback exceção: {e}")
             return None
-
         finally:
-            await page.close()
+            if page:
+                await page.close()
 
     # ── Navegação ──────────────────────────────────────────────────
 
@@ -271,6 +327,10 @@ class BrowserEngine:
     @property
     def is_alive(self) -> bool:
         return self._browser is not None and self._context is not None
+
+    @property
+    def user_agent(self) -> str:
+        return self._user_agent
 
     async def ensure_alive(self) -> None:
         """Garante que o browser está funcional; recicla se necessário."""
