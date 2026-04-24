@@ -34,16 +34,16 @@ SCHEDULED_RESPONSE = {
 
 INCIDENTS_WITH_RED = {
     "incidents": [
-        {"incidentType": "card", "cardType": "red", "time": 55, "isHome": True},
-        {"incidentType": "card", "cardType": "yellow", "time": 30, "isHome": False},
-        {"incidentType": "card", "cardType": "red", "time": 80, "isHome": False},
+        {"incidentType": "card", "incidentClass": "red", "time": 55, "isHome": True},
+        {"incidentType": "card", "incidentClass": "yellow", "time": 30, "isHome": False},
+        {"incidentType": "card", "incidentClass": "red", "time": 80, "isHome": False},
         {"incidentType": "goal", "time": 10, "isHome": True},
     ]
 }
 
 INCIDENTS_NO_RED = {
     "incidents": [
-        {"incidentType": "card", "cardType": "yellow", "time": 20, "isHome": True},
+        {"incidentType": "card", "incidentClass": "yellow", "time": 20, "isHome": True},
         {"incidentType": "goal", "time": 45, "isHome": False},
     ]
 }
@@ -90,8 +90,8 @@ async def test_get_red_cards_counts_correctly():
 @pytest.mark.asyncio
 async def test_get_red_cards_counts_yellow_red():
     incidents = [
-        {"incidentType": "card", "cardType": "yellowRed", "time": 70, "isHome": True},
-        {"incidentType": "card", "cardType": "yellow", "time": 30, "isHome": False},
+        {"incidentType": "card", "incidentClass": "yellowRed", "time": 70, "isHome": True},
+        {"incidentType": "card", "incidentClass": "yellow", "time": 30, "isHome": False},
     ]
     with patch("src.sofascore._get_incidents", new_callable=AsyncMock) as mock_inc:
         mock_inc.return_value = incidents

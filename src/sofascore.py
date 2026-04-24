@@ -70,7 +70,7 @@ async def get_red_cards(event_id: int) -> int:
     incidents = await _get_incidents(event_id)
     return sum(
         1 for inc in incidents
-        if inc.get("incidentType") == "card" and inc.get("cardType") in ("red", "yellowRed")
+        if inc.get("incidentType") == "card" and inc.get("incidentClass") in ("red", "yellowRed")
     )
 
 
