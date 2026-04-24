@@ -1,9 +1,13 @@
 """Notificação via Telegram Bot API (httpx)."""
 
+from __future__ import annotations
+
+from datetime import date as _date
+
 import httpx
 
 from src.config import settings
-from src.models import Opportunity
+from src.models import Opportunity, MatchResult
 
 _TIMEOUT = 10.0
 
@@ -44,3 +48,47 @@ def send_opportunity_alert(opp: Opportunity) -> bool:
         f'🔗 <a href="{opp.url}">Apostar na Betano</a>'
     )
     return _post(text)
+
+
+def send_daily_report(results: list, report_date: str | None = None) -> bool:
+    """Envia relatório diário consolidado no Telegram."""
+    if report_date is None:
+        report_date = _date.today().strftime("%d/%m/%Y")
+
+    won = [r for r in results if r.status == "won"]
+    lost = [r for r in results if r.status == "lost"]
+    unverified = [r for r in results if r.status == "unverified"]
+    verified = won + lost
+
+    lines = [
+        f"📋 <b>RELATÓRIO DIÁRIO — {report_date}</b>\n",
+        f"Total de alertas: {len(results)}",
+        f"✅ Vencedores: {len(won)}",
+        f"❌ Perdedores: {len(lost)}",
+        f"⏳ Não verificados: {len(unverified)}",
+        "\n─────────────────────────",
+    ]
+
+    for r in results:
+        if r.status == "won":
+            icon = "✅"
+            detail = f"{r.red_cards} cartão(ões) vermelho(s)"
+        elif r.status == "lost":
+            icon = "❌"
+            detail = f"{r.red_cards} cartão(ões) vermelho(s)"
+        else:
+            icon = "⏳"
+            detail = "Não verificado — timeout SofaScore"
+
+        lines.append(
+            f"{icon} <b>{r.home_team} x {r.away_team}</b>\n"
+            f"   {r.selection_name} @ {r.odd:.2f} | {detail}"
+        )
+
+    lines.append("─────────────────────────")
+
+    if verified:
+        pct = int(len(won) / len(verified) * 100)
+        lines.append(f"Taxa de acerto: {pct}% ({len(won)}/{len(verified)} verificados)")
+
+    return _post("\n".join(lines))
