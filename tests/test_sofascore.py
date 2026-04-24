@@ -93,3 +93,73 @@ async def test_get_red_cards_zero_when_none():
         mock_inc.return_value = INCIDENTS_NO_RED["incidents"]
         count = await sofascore.get_red_cards(99001)
     assert count == 0
+
+
+# ── Testes de validate_opportunity ────────────────────────────────────────────
+
+ENTRY_UNDER_05 = {
+    "event_id": "abc",
+    "home_team": "Flamengo",
+    "away_team": "Corinthians",
+    "competition": "Brasileirão",
+    "selection_name": "Menos de 0.5",
+    "odd": 1.85,
+    "alerted_at": "2026-04-24T14:00:00",
+}
+
+ENTRY_UNDER_15 = {**ENTRY_UNDER_05, "selection_name": "Menos de 1.5", "odd": 1.40}
+
+
+@pytest.mark.asyncio
+async def test_validate_opportunity_won_under_05_no_red_cards():
+    event = {"id": 99001, "homeTeam": {"name": "Flamengo"}, "awayTeam": {"name": "Corinthians"}, "status": {"type": "finished"}}
+    with patch("src.sofascore.find_event", new_callable=AsyncMock, return_value=event), \
+         patch("src.sofascore.get_red_cards", new_callable=AsyncMock, return_value=0):
+        result = await sofascore.validate_opportunity(ENTRY_UNDER_05, "2026-04-24")
+    assert result.status == "won"
+    assert result.won is True
+    assert result.red_cards == 0
+
+
+@pytest.mark.asyncio
+async def test_validate_opportunity_lost_under_05_with_red_card():
+    event = {"id": 99001, "homeTeam": {"name": "Flamengo"}, "awayTeam": {"name": "Corinthians"}, "status": {"type": "finished"}}
+    with patch("src.sofascore.find_event", new_callable=AsyncMock, return_value=event), \
+         patch("src.sofascore.get_red_cards", new_callable=AsyncMock, return_value=1):
+        result = await sofascore.validate_opportunity(ENTRY_UNDER_05, "2026-04-24")
+    assert result.status == "lost"
+    assert result.won is False
+    assert result.red_cards == 1
+
+
+@pytest.mark.asyncio
+async def test_validate_opportunity_won_under_15_one_red_card():
+    event = {"id": 99001, "homeTeam": {"name": "Flamengo"}, "awayTeam": {"name": "Corinthians"}, "status": {"type": "finished"}}
+    with patch("src.sofascore.find_event", new_callable=AsyncMock, return_value=event), \
+         patch("src.sofascore.get_red_cards", new_callable=AsyncMock, return_value=1):
+        result = await sofascore.validate_opportunity(ENTRY_UNDER_15, "2026-04-24")
+    assert result.status == "won"
+    assert result.won is True
+
+
+@pytest.mark.asyncio
+async def test_validate_opportunity_unverified_when_not_found():
+    with patch("src.sofascore.find_event", new_callable=AsyncMock, return_value=None):
+        result = await sofascore.validate_opportunity(ENTRY_UNDER_05, "2026-04-24")
+    assert result.status == "unverified"
+    assert result.won is None
+    assert result.red_cards == -1
+
+
+@pytest.mark.asyncio
+async def test_validate_opportunity_polls_until_finished():
+    """Verifica que o polling re-checa o status quando o jogo está em andamento."""
+    in_progress = {"id": 99001, "homeTeam": {"name": "Flamengo"}, "awayTeam": {"name": "Corinthians"}, "status": {"type": "inprogress"}}
+    finished = {"id": 99001, "homeTeam": {"name": "Flamengo"}, "awayTeam": {"name": "Corinthians"}, "status": {"type": "finished"}}
+
+    find_side_effects = [in_progress, finished]
+    with patch("src.sofascore.find_event", new_callable=AsyncMock, side_effect=find_side_effects), \
+         patch("src.sofascore.get_red_cards", new_callable=AsyncMock, return_value=0), \
+         patch("asyncio.sleep", new_callable=AsyncMock):
+        result = await sofascore.validate_opportunity(ENTRY_UNDER_05, "2026-04-24", poll_interval=0, max_polls=3)
+    assert result.status == "won"
