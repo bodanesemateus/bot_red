@@ -17,3 +17,7 @@ curl_cffi>=0.6.0
 
 # --- Env ---
 python-dotenv>=1.0.0
+
+# --- Testes ---
+pytest>=8.0.0
+pytest-asyncio>=0.24.0
