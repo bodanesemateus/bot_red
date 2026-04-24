@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from curl_cffi import requests as curl_requests
 
@@ -23,6 +23,8 @@ from src.browser import BrowserEngine
 from src.config import settings
 from src.models import GameContext
 from src.scanner import Scanner
+from src import opportunity_log
+from src.sofascore import validate_all
 from src import telegram_notifier as telegram
 
 
@@ -252,6 +254,36 @@ async def _fetch_live_events(
         return [], needs_refresh
 
 
+async def _sleep_until(hour: int, minute: int) -> None:
+    """Dorme até o próximo HH:MM do dia (ou do dia seguinte se já passou)."""
+    now = datetime.now()
+    target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    if target <= now:
+        target += timedelta(days=1)
+    delta = (target - now).total_seconds()
+    print(f"  [DailyReporter] Próximo relatório em {delta / 3600:.1f}h ({target.strftime('%d/%m %H:%M')})")
+    await asyncio.sleep(delta)
+
+
+async def daily_reporter() -> None:
+    """Task paralela: às 23:45 valida oportunidades do dia e envia relatório."""
+    while True:
+        await _sleep_until(23, 45)
+        print("\n[DailyReporter] Iniciando validação do dia...")
+
+        entries = opportunity_log.load_today()
+        if entries:
+            print(f"[DailyReporter] {len(entries)} oportunidade(s) para validar")
+            results = await validate_all(entries)
+            sent = telegram.send_daily_report(results)
+            print(f"[DailyReporter] Relatório enviado: {'OK' if sent else 'FALHOU'}")
+        else:
+            print("[DailyReporter] Nenhuma oportunidade hoje — relatório suprimido")
+
+        opportunity_log.delete_today()
+        await asyncio.sleep(60)
+
+
 async def run() -> None:
     print("=" * 60)
     print("BOT RED CARD v2 — Monitor Under Cartão Vermelho")
@@ -272,6 +304,9 @@ async def run() -> None:
     curl_session = await _refresh_curl_session(browser)
 
     scanner = Scanner(browser)
+
+    # Task paralela de relatório diário
+    asyncio.create_task(daily_reporter())
 
     # Notificar início
     telegram.send_message(
@@ -334,6 +369,7 @@ async def run() -> None:
                 print(f"  >> {opp.label} | {opp.selection_name} | Odd: {opp.odd:.2f}")
                 sent = telegram.send_opportunity_alert(opp)
                 print(f"  [Telegram] {'OK' if sent else 'FALHOU'}")
+                opportunity_log.append(opp)
                 alerted_events.add(f"{opp.event_id}:{opp.selection_name}")
 
             total_opportunities += len(new_opps)
