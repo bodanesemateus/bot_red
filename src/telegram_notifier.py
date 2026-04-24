@@ -42,6 +42,7 @@ def send_opportunity_alert(opp: Opportunity) -> bool:
         f"📊 <b>ALERTA - Cartão Vermelho Under</b>\n\n"
         f"⚽ Jogo: <b>{opp.home_team} x {opp.away_team}</b>\n"
         f"🏆 Competição: {opp.competition}\n"
+        f"🎯 Mercado: <b>{opp.selection_name}</b>\n"
         f"📈 Odd: <b>{opp.odd:.2f}</b>\n"
         f"🕐 Tempo: {opp.minute}'\n"
         f"👉 Resultado: {opp.score}\n\n"
